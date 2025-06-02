@@ -1,0 +1,151 @@
+---
+title: "ChIP-seq Report"
+output: html_document
+date: "2025-04-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, message=FALSE}
+library(DESeq2)
+library(tidyverse)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(ggplot2)
+```
+
+```{r, echo=FALSE, message=FALSE}
+counts <- read.delim("GSE75070_raw_counts_GRCh38.p13_NCBI.tsv", row.names=1)
+head(counts)
+```
+```{r, echo=FALSE, message=FALSE}
+entrez_ids <- rownames(counts)
+
+# Map Entrez IDs to HGNC symbols
+mapping <- AnnotationDbi::select(org.Hs.eg.db,
+                                 keys = entrez_ids,
+                                 keytype = "ENTREZID",
+                                 columns = c("SYMBOL"))
+
+# Remove rows with NA symbols
+mapping <- na.omit(mapping)
+
+# Some Entrez IDs may map to multiple symbols (resolve by taking first match)
+mapping <- mapping[!duplicated(mapping$ENTREZID), ]
+```
+
+```{r, echo=FALSE, message=FALSE}
+# Add ENTREZID as a column
+counts$ENTREZID <- rownames(counts)
+
+# Merge counts with gene symbol mapping
+counts_mapped <- merge(counts, mapping, by = "ENTREZID")
+
+# Option 1: Make SYMBOLs unique by appending a suffix (e.g., ".1", ".2", etc.)
+counts_mapped$SYMBOL <- make.unique(counts_mapped$SYMBOL)
+
+# Set SYMBOL as row names
+rownames(counts_mapped) <- counts_mapped$SYMBOL
+
+# Remove redundant columns
+counts_mapped <- counts_mapped[, !(names(counts_mapped) %in% c("ENTREZID", "SYMBOL"))]
+
+# Check result
+cat("Mapped count matrix with unique gene symbols:\n")
+print(head(counts_mapped))
+```
+
+```{r, echo=FALSE, message=FALSE}
+# Define sample conditions (3 control, 3 experimental)
+condition <- factor(c("control", "control", "control", "exp", "exp", "exp"))
+colData <- data.frame(row.names=colnames(counts_mapped), condition=condition)
+```
+
+```{r, echo=FALSE, message=FALSE}
+# Create DESeq2 dataset
+dds <- DESeqDataSetFromMatrix(countData=counts_mapped, colData=colData, design=~condition)
+
+# Run DESeq
+dds <- DESeq(dds)
+res <- results(dds)
+```
+
+```{r,echo=FALSE, message=FALSE}
+# Load annotated peaks
+annot <- read.delim("/projectnb/bf528/students/bsandi/projects/project-2-bssandilya/results/annotated_peaks.txt", header = TRUE)
+
+# Keep only peaks with gene annotations
+annot <- subset(annot, grepl("^[^;]+$", annot$Gene.Name))
+
+# Keep only genes present in DESeq2 results
+res_df <- as.data.frame(res)
+res_df$symbol <- rownames(res_df)
+```
+
+```{r,echo=FALSE, message=FALSE}
+# Merge annotation with DE results
+annot_de <- annot %>% inner_join(res_df, by = c("Gene.Name" = "symbol"))
+
+# Redefine TSS-bound: within 5kb of TSS
+annot_tss <- annot_de %>%
+  filter(abs(Distance.to.TSS) <= 5000)
+
+# Redefine gene body-bound: within 20kb of TSS or TES
+annot_body <- annot_de %>%
+  filter(abs(Distance.to.TSS) <= 20000)
+
+# Compute number of up/downregulated genes with peaks at TSS/body
+tss_up <- sum(annot_tss$log2FoldChange > 1 & annot_tss$padj < 0.05, na.rm = TRUE)
+tss_down <- sum(annot_tss$log2FoldChange < -1 & annot_tss$padj < 0.05, na.rm = TRUE)
+body_up <- sum(annot_body$log2FoldChange > 1 & annot_body$padj < 0.05, na.rm = TRUE)
+body_down <- sum(annot_body$log2FoldChange < -1 & annot_body$padj < 0.05, na.rm = TRUE)
+
+# Compute total up/downregulated DE genes
+total_up <- sum(res_df$log2FoldChange > 1 & res_df$padj < 0.05, na.rm = TRUE)
+total_down <- sum(res_df$log2FoldChange < -1 & res_df$padj < 0.05, na.rm = TRUE)
+
+# Proportion of DE genes with peaks
+prop <- data.frame(
+    Region = c("TSS", "TSS", "Body", "Body"),
+    Direction = c("Up", "Down", "Up", "Down"),
+    Proportion = c(
+        tss_up / total_up,
+        tss_down / total_down,
+        body_up / total_up,
+        body_down / total_down
+    )
+)
+```
+
+```{r,echo=FALSE, message=FALSE}
+# Prepare final data for barplot
+bar_data <- data.frame(
+  Region = rep(c("±5kb TSS", "±20kb gene"), each = 2),
+  Direction = rep(c("Up-regulated", "Down-regulated"), times = 2),
+  Bound = c(tss_up, tss_down, body_up, body_down),
+  NotBound = c(total_up - tss_up, total_down - tss_down,
+               total_up - body_up, total_down - body_down)
+)
+
+# Convert to percentage
+bar_data$BoundPct <- bar_data$Bound / (bar_data$Bound + bar_data$NotBound) * 100
+bar_data$NotBoundPct <- 100 - bar_data$BoundPct
+
+# Plot
+ggplot(bar_data, aes(x = interaction(Direction, Region), y = 100)) +
+  geom_bar(aes(y = NotBoundPct), stat = "identity", fill = "lightgray") +
+  geom_bar(aes(y = BoundPct), stat = "identity", fill = "orangered") +
+  geom_text(aes(y = BoundPct / 2, label = Bound), size = 3) +
+  geom_text(aes(y = BoundPct + (NotBoundPct / 2), label = NotBound), size = 3) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 100)) +
+  labs(
+    x = "", y = "Percentage of genes",
+    title = "RUNX1 Binding in DE Genes",
+    fill = "RUNX1 Binding"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
+```
+
