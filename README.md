@@ -21,6 +21,4 @@ The pipeline generates:
 - **Visualization**: Coverage plots and heatmaps generated using deepTools.
 
 ## Citation
-```
 > Chakraborty, A., et al. (2022). *RUNX1 contributes to higher-order chromatin organization and gene regulation in breast cancer cells*. Nature Communications. [PMCID: PMC5071180](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5071180/)
-```
